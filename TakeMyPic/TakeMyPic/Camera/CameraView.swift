@@ -3,21 +3,40 @@ import AVFoundation
 import UIKit
 
 struct CameraView: View {
-    let mode: CameraMode
     @ObservedObject var traceStore: TraceStore
     let onClose: () -> Void
 
+    @State private var mode: CameraMode
     @StateObject private var controller = CameraController()
     @StateObject private var motion = MotionService()
-    @State private var overlayOpacity: Double = 0.4
+
+    // Live controls
+    @State private var overlayOpacity: Double = 0.55
+    @State private var pinchStartZoom: CGFloat?
+
+    // Capture state
     @State private var isCapturing = false
     @State private var isSaving = false
-    @State private var errorMessage: String?
-    @State private var didCelebrate = false
     @State private var capturedImage: UIImage?
     @State private var capturedData: Data?
+    @State private var capturedRoll: Double?
     @State private var revealFraction: Double = 0.0
-    @State private var pinchStartZoom: CGFloat?
+
+    // Misc
+    @State private var errorMessage: String?
+    @State private var didCelebrate = false
+
+    // MARK: - Tunables (the green border threshold lives here too)
+
+    /// Score above this turns the border green and triggers a haptic.
+    /// Raise to make "matched" harder, lower to make it easier.
+    private let greenThreshold: Double = 0.85
+
+    init(mode: CameraMode, traceStore: TraceStore, onClose: @escaping () -> Void) {
+        self.traceStore = traceStore
+        self.onClose = onClose
+        self._mode = State(initialValue: mode)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -29,7 +48,7 @@ struct CameraView: View {
                 topChrome
                     .frame(height: topSpace)
                 previewArea(width: width, height: previewHeight)
-                bottomChrome
+                bottomChrome(screenWidth: width)
                     .frame(maxHeight: .infinity)
             }
             .background(Color.black)
@@ -47,10 +66,10 @@ struct CameraView: View {
             motion.stop()
         }
         .onChange(of: controller.matchScore) { _, newScore in
-            if newScore >= 0.8 && !didCelebrate {
+            if Double(newScore) >= greenThreshold && !didCelebrate {
                 didCelebrate = true
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
-            } else if newScore < 0.65 {
+            } else if Double(newScore) < greenThreshold - 0.15 {
                 didCelebrate = false
             }
         }
@@ -88,13 +107,17 @@ struct CameraView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .mask { DiamondBorderMask() }
                     .opacity(overlayOpacity)
                     .allowsHitTesting(false)
 
-                TiltIndicator(roll: motion.roll)
-                    .allowsHitTesting(false)
+                TiltIndicator(
+                    currentRoll: motion.roll,
+                    targetRoll: targetRoll
+                )
+                .allowsHitTesting(false)
 
-                MatchBorder(score: controller.matchScore)
+                MatchBorder(score: controller.matchScore, greenThreshold: greenThreshold)
                     .allowsHitTesting(false)
             }
         }
@@ -134,6 +157,13 @@ struct CameraView: View {
                 }
             }
         }
+    }
+
+    private var targetRoll: Double {
+        if case .match(_, let id) = mode {
+            return traceStore.roll(for: id) ?? 0
+        }
+        return 0
     }
 
     // MARK: - Top chrome
@@ -177,7 +207,7 @@ struct CameraView: View {
     }
 
     private var showsScore: Bool {
-        capturedImage == nil && (mode.isMatch)
+        capturedImage == nil && mode.isMatch
     }
 
     private var modeLabel: String {
@@ -190,33 +220,46 @@ struct CameraView: View {
 
     // MARK: - Bottom chrome
 
-    private var bottomChrome: some View {
-        VStack(spacing: 14) {
+    private func bottomChrome(screenWidth: CGFloat) -> some View {
+        let sliderWidth = screenWidth * 0.6
+
+        return VStack(spacing: 14) {
             if capturedImage == nil {
-                zoomRow
-                shutterRow
                 if case .match = mode {
-                    labeledSlider(
+                    sliderRow(
                         label: "Transparency",
                         value: $overlayOpacity,
-                        range: 0.1...0.85
+                        range: 0.1...0.9
                     )
+                    .frame(width: sliderWidth)
                 }
+                zoomRow
+                shutterRow
             } else {
                 if case .match = mode {
-                    labeledSlider(
+                    sliderRow(
                         label: "Original",
                         value: $revealFraction,
                         range: 0.0...1.0
                     )
+                    .frame(width: sliderWidth)
                 }
                 photoActions
+                    .padding(.horizontal, 16)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
         .padding(.top, 14)
         .frame(maxWidth: .infinity)
+    }
+
+    private func sliderRow(label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        VStack(spacing: 3) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            SlimSlider(value: value, range: range)
+        }
     }
 
     private var zoomRow: some View {
@@ -270,30 +313,12 @@ struct CameraView: View {
         .disabled(isCapturing)
     }
 
-    private func labeledSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        VStack(spacing: 4) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
-            HStack(spacing: 10) {
-                Image(systemName: "circle.dotted")
-                    .foregroundStyle(.white.opacity(0.7))
-                Slider(value: value, in: range)
-                    .tint(.white)
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(Color.white.opacity(0.12), in: Capsule())
-    }
-
     private var photoActions: some View {
         HStack(spacing: 18) {
             Button {
                 capturedImage = nil
                 capturedData = nil
+                capturedRoll = nil
                 revealFraction = 0
             } label: {
                 Text("Retake")
@@ -342,6 +367,7 @@ struct CameraView: View {
         if capturedImage != nil {
             capturedImage = nil
             capturedData = nil
+            capturedRoll = nil
             revealFraction = 0
             return
         }
@@ -372,6 +398,7 @@ struct CameraView: View {
             }
             capturedData = data
             capturedImage = image
+            capturedRoll = motion.roll
             revealFraction = 0
         } catch {
             errorMessage = error.localizedDescription
@@ -379,16 +406,28 @@ struct CameraView: View {
     }
 
     private func keep() async {
-        guard let data = capturedData else { return }
+        guard let data = capturedData, let image = capturedImage else { return }
         guard !isSaving else { return }
         isSaving = true
         defer { isSaving = false }
         do {
             let id = try await PhotoLibraryService.saveJPEG(data)
             if case .reference = mode {
-                traceStore.add(id, metadata: TraceMetadata(zoom: Double(controller.displayZoom)))
+                let meta = TraceMetadata(
+                    zoom: Double(controller.displayZoom),
+                    roll: capturedRoll
+                )
+                traceStore.add(id, metadata: meta)
+                mode = .match(referenceImage: image, referenceAssetID: id)
+                capturedImage = nil
+                capturedData = nil
+                capturedRoll = nil
+                revealFraction = 0
+                overlayOpacity = 0.55
+                controller.setReference(image)
+            } else {
+                onClose()
             }
-            onClose()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -415,6 +454,7 @@ private extension CameraMode {
 
 private struct MatchBorder: View {
     let score: Float
+    let greenThreshold: Double
 
     var body: some View {
         GeometryReader { _ in
@@ -426,11 +466,12 @@ private struct MatchBorder: View {
 
     private var color: Color {
         let s = Double(max(0, min(1, score)))
-        if s < 0.4 {
-            let t = s / 0.4
+        let amberStart = greenThreshold * 0.5
+        if s < amberStart {
+            let t = s / max(amberStart, 0.01)
             return Color(red: 1, green: 0.3 + 0.5 * t, blue: 0.2)
-        } else if s < 0.8 {
-            let t = (s - 0.4) / 0.4
+        } else if s < greenThreshold {
+            let t = (s - amberStart) / max(greenThreshold - amberStart, 0.01)
             return Color(red: 1 - 0.5 * t, green: 0.8 + 0.15 * t, blue: 0)
         } else {
             return Color(red: 0, green: 0.95, blue: 0.3)
@@ -444,23 +485,30 @@ private struct MatchBorder: View {
 }
 
 private struct TiltIndicator: View {
-    let roll: Double
+    let currentRoll: Double
+    let targetRoll: Double
+
+    private let tolerance: Double = 0.025
 
     var body: some View {
+        let delta = currentRoll - targetRoll
+        let isLevel = abs(delta) < tolerance
+
         GeometryReader { geo in
-            let isLevel = abs(roll) < 0.025
             ZStack {
                 Rectangle()
-                    .fill(isLevel ? Color.yellow.opacity(0) : Color.white.opacity(0.35))
-                    .frame(width: geo.size.width * 0.45, height: 1)
+                    .fill(isLevel ? Color.yellow.opacity(0) : Color.white.opacity(0.45))
+                    .frame(width: geo.size.width * 0.5, height: 1)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .rotationEffect(.radians(-targetRoll))
+
                 Rectangle()
-                    .fill(isLevel ? Color.yellow : Color.white.opacity(0.75))
-                    .frame(width: geo.size.width * 0.45, height: isLevel ? 2 : 1)
+                    .fill(isLevel ? Color.yellow : Color.white.opacity(0.85))
+                    .frame(width: geo.size.width * 0.5, height: isLevel ? 2.5 : 1.5)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                    .rotationEffect(.radians(roll))
+                    .rotationEffect(.radians(-currentRoll))
             }
-            .animation(.easeOut(duration: 0.1), value: isLevel)
+            .animation(.easeOut(duration: 0.08), value: isLevel)
         }
     }
 }

@@ -3,6 +3,7 @@ import Combine
 
 struct TraceMetadata: Codable, Equatable {
     var zoom: Double
+    var roll: Double?
 }
 
 final class TraceStore: ObservableObject {
@@ -45,6 +46,10 @@ final class TraceStore: ObservableObject {
 
     func zoom(for id: String) -> Double {
         metadata[id]?.zoom ?? 1.0
+    }
+
+    func roll(for id: String) -> Double? {
+        metadata[id]?.roll
     }
 
     private func persist() {

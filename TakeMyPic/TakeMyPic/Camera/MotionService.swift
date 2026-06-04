@@ -14,8 +14,10 @@ final class MotionService: ObservableObject {
         manager.deviceMotionUpdateInterval = 1.0 / 30.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
-            self.roll = motion.attitude.roll
-            self.pitch = motion.attitude.pitch
+            let g = motion.gravity
+            self.roll = atan2(g.x, -g.y)
+            let lateral = sqrt(g.x * g.x + g.y * g.y)
+            self.pitch = atan2(-g.z, lateral)
         }
     }
 

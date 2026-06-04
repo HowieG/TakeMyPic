@@ -9,6 +9,8 @@ struct LibraryView: View {
     @State private var isLoadingSelection = false
     @State private var showCleanupAlert = false
     @State private var authorizationDenied = false
+    @State private var showPicker = false
+    @State private var pickerError: String?
 
     private let columns = [GridItem(.adaptive(minimum: 108), spacing: 6)]
 
@@ -57,6 +59,24 @@ struct LibraryView: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
+        .sheet(isPresented: $showPicker) {
+            PhotoPicker(
+                onPicked: { id in
+                    showPicker = false
+                    Task { await usePickedAsset(id: id) }
+                },
+                onCancelled: { showPicker = false }
+            )
+            .ignoresSafeArea()
+        }
+        .alert("Couldn't use that photo", isPresented: Binding(
+            get: { pickerError != nil },
+            set: { if !$0 { pickerError = nil } }
+        ), actions: {
+            Button("OK") { pickerError = nil }
+        }, message: {
+            Text(pickerError ?? "")
+        })
     }
 
     private var header: some View {
@@ -72,16 +92,29 @@ struct LibraryView: View {
     }
 
     private var actions: some View {
-        Button {
-            onPick(.reference)
-        } label: {
-            Label("Take new reference", systemImage: "camera.viewfinder")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
+        VStack(spacing: 8) {
+            Button {
+                onPick(.reference)
+            } label: {
+                Label("Take new reference", systemImage: "camera.viewfinder")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button {
+                showPicker = true
+            } label: {
+                Label("Pick from Photos", systemImage: "photo.on.rectangle")
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
         .padding(.horizontal)
     }
 
@@ -163,6 +196,23 @@ struct LibraryView: View {
         defer { isLoadingSelection = false }
         guard let image = await PhotoLibraryService.loadImage(for: asset) else { return }
         onPick(.match(referenceImage: image, referenceAssetID: asset.localIdentifier))
+    }
+
+    private func usePickedAsset(id: String) async {
+        isLoadingSelection = true
+        defer { isLoadingSelection = false }
+
+        let found = PhotoLibraryService.fetchAssets(identifiers: [id])
+        guard let asset = found.first else {
+            pickerError = "That photo isn't in your library anymore. Try a different one."
+            return
+        }
+        guard let image = await PhotoLibraryService.loadImage(for: asset) else {
+            pickerError = "Couldn't load the picked photo."
+            return
+        }
+        traceStore.add(id, metadata: TraceMetadata(zoom: 1.0, roll: nil))
+        onPick(.match(referenceImage: image, referenceAssetID: id))
     }
 
     private func cleanup() async {
